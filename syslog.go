@@ -16,6 +16,7 @@ package syslog
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -79,6 +80,40 @@ const (
 	LOG_LOCAL7
 )
 
+var (
+	AppendBare Appender = AppenderFunc(
+		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
+			return fmt.Fprintf(w, "<%d>%s[%d]: %s%s",
+				p, host, tag, os.Getpid(), msg, termCap(msg))
+		},
+	)
+	AppendRFC3339 Appender = AppenderFunc(
+		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
+			timestamp := time.Now().Format(time.RFC3339)
+			return fmt.Fprintf(w, "<%d>%s %s %s[%d]: %s%s",
+				p, timestamp, host, tag, os.Getpid(), msg, termCap(msg))
+		},
+	)
+)
+
+type Appender interface {
+	Append(w io.Writer, p Priority, host, tag, msg string) (int, error)
+}
+
+type AppenderFunc func(io.Writer, Priority, string, string, string) (int, error)
+
+func (fn AppenderFunc) Append(w io.Writer, p Priority, host, tag, msg string) (int, error) {
+	return fn(w, p, host, tag, msg)
+}
+
+func termCap(msg string) string {
+	if strings.HasSuffix(msg, "\n") {
+		return ""
+	} else {
+		return "\n"
+	}
+}
+
 // A Writer is a connection to a syslog server.
 type Writer struct {
 	priority Priority
@@ -86,6 +121,7 @@ type Writer struct {
 	hostname string
 	network  string
 	raddr    string
+	appender Appender
 
 	mu   sync.Mutex // guards conn
 	conn net.Conn
@@ -96,6 +132,10 @@ type Writer struct {
 // priority and prefix.
 func New(priority Priority, tag string) (w *Writer, err error) {
 	return Dial("", "", priority, tag)
+}
+
+func NewAppended(pri Priority, tag string, a Appender) (w *Writer, err error) {
+	return DialAppended("", "", pri, tag, a)
 }
 
 // Dial establishes a connection to a log daemon by connecting to
@@ -118,6 +158,7 @@ func Dial(network, raddr string, priority Priority, tag string) (*Writer, error)
 		hostname: hostname,
 		network:  network,
 		raddr:    raddr,
+		appender: AppendRFC3339,
 	}
 
 	w.mu.Lock()
@@ -128,6 +169,18 @@ func Dial(network, raddr string, priority Priority, tag string) (*Writer, error)
 		return nil, err
 	}
 	return w, err
+}
+
+func DialAppended(net, raddr string, pri Priority, tag string, a Appender) (*Writer, error) {
+	if a == nil {
+		return nil, fmt.Errorf("nil Appender")
+	}
+	w, err := Dial(net, raddr, pri, tag)
+	if err != nil {
+		return nil, err
+	}
+	w.appender = a
+	return w, nil
 }
 
 // connect makes a connection to the syslog server.
@@ -251,17 +304,7 @@ func (w *Writer) writeAndRetry(p Priority, s string) (int, error) {
 // write generates and writes a syslog formatted string. The
 // format is as follows: <PRI>TIMESTAMP HOSTNAME TAG[PID]: MSG
 func (w *Writer) write(p Priority, msg string) (int, error) {
-	// ensure it ends in a \n
-	nl := ""
-	if !strings.HasSuffix(msg, "\n") {
-		nl = "\n"
-	}
-
-	timestamp := time.Now().Format(time.RFC3339)
-	fmt.Fprintf(w.conn, "<%d>%s %s %s[%d]: %s%s",
-		p, timestamp, w.hostname,
-		w.tag, os.Getpid(), msg, nl)
-	return len(msg), nil
+	return w.appender.Append(w.conn, p, w.hostname, w.tag, msg)
 }
 
 // NewLogger creates a log.Logger whose output is written to
@@ -270,6 +313,14 @@ func (w *Writer) write(p Priority, msg string) (int, error) {
 // the Logger.
 func NewLogger(p Priority, logFlag int) (*log.Logger, error) {
 	s, err := New(p, "")
+	if err != nil {
+		return nil, err
+	}
+	return log.New(s, "", logFlag), nil
+}
+
+func NewLoggerAppended(pri Priority, logFlag int, a Appender) (*log.Logger, error) {
+	s, err := NewAppended(pri, "", a)
 	if err != nil {
 		return nil, err
 	}
