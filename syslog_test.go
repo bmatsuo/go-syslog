@@ -8,6 +8,7 @@ package syslog
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -18,6 +19,89 @@ import (
 	"testing"
 	"time"
 )
+
+// a mock net.Conn implementation
+type ConnRecorder struct {
+	writes  [][]byte
+	writech chan []byte
+}
+
+func NewConnRecorder(writech chan<- []byte) *ConnRecorder {
+	conn := new(ConnRecorder)
+	conn.writech = make(chan []byte)
+	go func() {
+		for p := range conn.writech {
+			conn.writes = append(conn.writes, p)
+			select {
+			case writech <- p:
+				break
+			default:
+				break
+			}
+		}
+	}()
+	return conn
+}
+
+func (conn *ConnRecorder) Read([]byte) (int, error) {
+	return -1, fmt.Errorf("cannot read")
+}
+
+func (conn *ConnRecorder) Write(p []byte) (int, error) {
+	conn.writech <- p
+	return len(p), nil
+}
+
+func (conn *ConnRecorder) Close() error {
+	close(conn.writech)
+	return nil
+}
+
+func (conn *ConnRecorder) LocalAddr() net.Addr {
+	return nil
+}
+
+func (conn *ConnRecorder) RemoteAddr() net.Addr {
+	return nil
+}
+
+func (conn *ConnRecorder) SetDeadline(time.Time) error {
+	return fmt.Errorf("unimplemented")
+}
+
+func (conn *ConnRecorder) SetReadDeadline(time.Time) error {
+	return fmt.Errorf("unimplemented")
+}
+
+func (conn *ConnRecorder) SetWriteDeadline(time.Time) error {
+	return fmt.Errorf("unimplemented")
+}
+
+func TestSyslog(t *testing.T) {
+	writech := make(chan []byte, 1)
+	conn := NewConnRecorder(writech)
+	slog, err := NewSyslog(conn, AppendRFC3339, LOG_LOCAL0, LOG_INFO, "go-syslog")
+	if err != nil {
+		t.Fatal("could not init: ", err)
+	}
+
+	logger := slog.Logger("test")
+	for i := 0; i < 10; i++ {
+		msg := fmt.Sprintf("loop iteration: ", i)
+		err := logger.Notice(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		p := <-writech
+		if bytes.Index(p, []byte(msg)) < 0 {
+			t.Fatal("message not found")
+		}
+	}
+
+	slog.Close()
+	conn.Close()
+}
 
 func runPktSyslog(c net.PacketConn, done chan<- string) {
 	var buf [4096]byte

@@ -22,6 +22,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -143,6 +144,288 @@ func New(priority Priority, tag string) (w *Writer, err error) {
 
 func NewAppended(pri Priority, tag string, a Appender) (w *Writer, err error) {
 	return DialAppended("", "", pri, tag, a)
+}
+
+type message struct {
+	pri     Priority
+	tag     string
+	content string
+	next    *message
+}
+
+type Syslog struct {
+	conn      net.Conn
+	hostname  string
+	facility  Priority
+	level     map[string]Priority
+	baseLevel Priority
+	baseTag   string
+	tagSep    string
+	appender  Appender
+	highwater int64
+	in        chan message
+	termlock  chan chan chan error
+}
+
+type Logger struct {
+	syslog *Syslog
+	tag    string
+	pri    Priority
+}
+
+func NewSyslog(conn net.Conn, appender Appender, facility Priority, level Priority, tag string) (*Syslog, error) {
+	if conn == nil {
+		return nil, fmt.Errorf("nil net.Conn")
+	}
+	if appender == nil {
+		return nil, fmt.Errorf("nil Appender")
+	}
+
+	syslog := new(Syslog)
+	syslog.conn = conn
+	syslog.appender = appender
+	syslog.facility = facility
+	syslog.baseLevel = level
+	syslog.baseTag = tag
+	syslog.tagSep = "."
+
+	syslog.hostname, _ = os.Hostname()
+	if syslog.hostname == "" {
+		syslog.hostname = "localhost"
+	}
+
+	syslog.in = make(chan message, 0)
+	syslog.termlock = make(chan chan chan error, 1)
+	syslog.termlock <- nil
+
+	err := syslog.start()
+	if err != nil {
+		return nil, err
+	}
+
+	return syslog, nil
+}
+
+// not threadsafe
+type messageQueue struct {
+	length     int
+	head, tail *message
+}
+
+var errEmpty = fmt.Errorf("empty")
+var errHighwater = fmt.Errorf("highwater threshold reached")
+
+func (q *messageQueue) Dequeue() (*message, error) {
+	if q.length == 0 {
+		return nil, errEmpty
+	}
+	msg := q.head
+	q.head = q.head.next
+	return msg, nil
+}
+
+func (q *messageQueue) Enqueue(highwater int, msg *message) error {
+	// check msg first
+	if msg == nil {
+		return fmt.Errorf("nil msg")
+	}
+	if msg.next != nil {
+		return fmt.Errorf("msg already enqueued")
+	}
+
+	if highwater <= q.length {
+		return errHighwater
+	}
+
+	if q.head == nil {
+		q.head = msg
+	}
+	if q.tail != nil {
+		q.tail.next = msg
+	}
+	q.tail = msg
+
+	return nil
+}
+
+func (syslog *Syslog) start() error {
+	term := <-syslog.termlock
+	if term != nil {
+		return fmt.Errorf("already started")
+	}
+
+	connDone := make(chan error, 1)
+
+	term = make(chan chan error, 1)
+	syslog.termlock <- term
+
+	q := new(messageQueue)
+
+	go func() {
+		var closed bool
+		for cont := true; cont; {
+			select {
+			case err := <-connDone:
+				if err != nil {
+					syslog.failure(err)
+				}
+				if closed {
+					cont = false
+				} else {
+					// TODO configurable dequeue size; grouped errors?
+					msg, err := q.Dequeue()
+					switch err {
+					case errEmpty:
+						break
+					case nil:
+						go func() { connDone <- syslog.writeString(msg.pri, msg.tag, msg.content) }()
+					default:
+						go syslog.failure(err)
+					}
+				}
+			case msg := <-syslog.in:
+				highwater := atomic.LoadInt64(&syslog.highwater)
+				err := q.Enqueue(int(highwater), &msg)
+				if err != nil {
+					syslog.drop(&msg, err)
+				}
+			case errch := <-term:
+				closed = true
+				errch <- nil
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (syslog *Syslog) drop(msg *message, err error) {
+	// FIXME fail fast channel send or something
+}
+
+func (syslog *Syslog) failure(err error) {
+	// FIXME fail fast channel send or something
+}
+
+func (syslog *Syslog) Close() error {
+	return nil
+}
+
+func (syslog *Syslog) Highwater(n int) {
+	atomic.StoreInt64(&syslog.highwater, int64(n))
+}
+
+func (syslog *Syslog) writeString(level Priority, tag string, msg string) error {
+	pri := syslog.facility
+	pri = pri | (level & severityMask)
+	return syslog.doConn(func(conn net.Conn) error {
+		if conn != nil {
+			_, err := syslog.appender.Append(conn, pri, syslog.hostname, tag, msg)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (syslog *Syslog) doConn(fn func(net.Conn) error) error {
+	return fn(syslog.conn)
+}
+
+func (syslog *Syslog) Logger(tag string) *Logger {
+	if tag == "" {
+		tag = syslog.baseTag
+	} else {
+		tag = fmt.Sprintf("%s.%s", syslog.baseTag, tag)
+	}
+
+	pri := syslog.facility
+	level, ok := syslog.level[tag]
+	if !ok {
+		level = syslog.baseLevel
+		if level == 0 {
+			level = LOG_INFO
+		}
+	}
+	pri = pri | level
+
+	return &Logger{
+		syslog: syslog,
+		pri:    pri,
+		tag:    tag,
+	}
+}
+
+func (logger *Logger) Emergf(format string, v ...interface{}) error {
+	return logger.Emerg(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Alertf(format string, v ...interface{}) error {
+	return logger.Alert(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Critf(format string, v ...interface{}) error {
+	return logger.Crit(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Errf(format string, v ...interface{}) error {
+	return logger.Err(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Warningf(format string, v ...interface{}) error {
+	return logger.Warning(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Noticef(format string, v ...interface{}) error {
+	return logger.Notice(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Infof(format string, v ...interface{}) error {
+	return logger.Info(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Debugf(format string, v ...interface{}) error {
+	return logger.Debug(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) Printf(format string, v ...interface{}) error {
+	return logger.Print(fmt.Sprintf(format, v...))
+}
+func (logger *Logger) PrintLevelf(level Priority, format string, v ...interface{}) error {
+	return logger.PrintLevel(level, fmt.Sprintf(format, v...))
+}
+
+func (logger *Logger) Emerg(v ...interface{}) error {
+	return logger.PrintLevel(LOG_EMERG, v...)
+}
+func (logger *Logger) Alert(v ...interface{}) error {
+	return logger.PrintLevel(LOG_ALERT, v...)
+}
+func (logger *Logger) Crit(v ...interface{}) error {
+	return logger.PrintLevel(LOG_CRIT, v...)
+}
+func (logger *Logger) Err(v ...interface{}) error {
+	return logger.PrintLevel(LOG_ERR, v...)
+}
+func (logger *Logger) Warning(v ...interface{}) error {
+	return logger.PrintLevel(LOG_WARNING, v...)
+}
+func (logger *Logger) Notice(v ...interface{}) error {
+	return logger.PrintLevel(LOG_NOTICE, v...)
+}
+func (logger *Logger) Info(v ...interface{}) error {
+	return logger.PrintLevel(LOG_INFO, v...)
+}
+func (logger *Logger) Debug(v ...interface{}) error {
+	return logger.PrintLevel(LOG_DEBUG, v...)
+}
+func (logger *Logger) Print(v ...interface{}) error {
+	return logger.PrintLevel(logger.pri, v...)
+}
+
+func (logger *Logger) PrintLevel(level Priority, v ...interface{}) error {
+	return logger.syslog.writeString(level, logger.tag, fmt.Sprint(v...))
+}
+
+func (logger *Logger) Write(p []byte) (int, error) {
+	err := logger.syslog.writeString(logger.pri, logger.tag, string(p))
+	if err != nil {
+		return 0, err
+	}
+	return len(p), err
 }
 
 // Dial establishes a connection to a log daemon by connecting to
