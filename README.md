@@ -1,6 +1,8 @@
 go-syslog
 =========
 
+[![Build Status](https://travis-ci.org/bmatsuo/go-syslog.png?branch=master)](https://travis-ci.org/bmatsuo/go-syslog)
+
 a fork of the standard library's log/syslog package. meant as a drop-in
 replacement. go-syslog aims to be more flexible about output format to
 get along better with rsyslogd (and others?).
