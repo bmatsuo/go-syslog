@@ -87,6 +87,13 @@ var (
 				p, host, tag, os.Getpid(), msg, termCap(msg))
 		},
 	)
+	AppendStd Appender = AppenderFunc(
+		func(w io.Writer, pri Priority, host, tag, msg string) (int, error) {
+			timestamp := time.Now().Format(time.Stamp)
+			return fmt.Fprintf(w, "<%d>%s %s[%d]: %s%s",
+				pri, timestamp, tag, os.Getpid(), msg, termCap(msg))
+		},
+	)
 	AppendRFC3339 Appender = AppenderFunc(
 		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
 			timestamp := time.Now().Format(time.RFC3339)
