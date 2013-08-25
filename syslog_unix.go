@@ -11,10 +11,9 @@ import (
 	"net"
 )
 
-// unixSyslog opens a connection to the syslog daemon running on the
+// UnixConn opens a connection to the syslog daemon running on the
 // local machine using a Unix domain socket.
-
-func unixSyslog() (conn net.Conn, err error) {
+func UnixConn() (conn net.Conn, err error) {
 	logTypes := []string{"unixgram", "unix"}
 	logPaths := []string{"/dev/log", "/var/run/syslog"}
 	for _, network := range logTypes {

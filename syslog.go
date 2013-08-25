@@ -193,7 +193,7 @@ func (w *Writer) connect() (err error) {
 	}
 
 	if w.network == "" {
-		w.conn, err = unixSyslog()
+		w.conn, err = UnixConn()
 		if w.hostname == "" {
 			w.hostname = "localhost"
 		}
