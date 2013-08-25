@@ -35,6 +35,7 @@ func BenchmarkSyslogType(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer slog.Close()
 	logger := slog.Logger("")
 
 	for i := 0; i < b.N; i++ {
@@ -49,6 +50,7 @@ func BenchmarkWriter(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer w.Close()
 
 	for i := 0; i < b.N; i++ {
 		w.Crit(fmt.Sprintf("Writer %d", i))
@@ -63,6 +65,7 @@ func BenchmarkWriterAppended(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	defer w.Close()
 
 	for i := 0; i < b.N; i++ {
 		w.Crit(fmt.Sprintf("Writer AppendStd %d", i))
