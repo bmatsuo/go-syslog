@@ -35,7 +35,7 @@ func BenchmarkSyslogType(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	logger := slog.Logger("Syslog")
+	logger := slog.Logger("")
 
 	for i := 0; i < b.N; i++ {
 		logger.Critf("Syslog %d", i)
@@ -43,16 +43,43 @@ func BenchmarkSyslogType(b *testing.B) {
 }
 
 func BenchmarkWriter(b *testing.B) {
-	w, err := DialAppended("", "",
+	w, err := Dial("", "",
 		LOG_LOCAL0|LOG_NOTICE,
-		"go-syslog.Writer",
-		AppendStd)
+		"go-syslog")
 	if err != nil {
 		b.Fatal(err)
 	}
 
 	for i := 0; i < b.N; i++ {
 		w.Crit(fmt.Sprintf("Writer %d", i))
+	}
+}
+
+func BenchmarkWriterAppended(b *testing.B) {
+	w, err := DialAppended("", "",
+		LOG_LOCAL0|LOG_NOTICE,
+		"go-syslog",
+		AppendStd)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for i := 0; i < b.N; i++ {
+		w.Crit(fmt.Sprintf("Writer AppendStd %d", i))
+	}
+}
+
+func BenchmarkWriterBare(b *testing.B) {
+	w, err := DialAppended("", "",
+		LOG_LOCAL0|LOG_NOTICE,
+		"go-syslog",
+		AppendBare)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for i := 0; i < b.N; i++ {
+		w.Crit(fmt.Sprintf("Writer AppendBare %d", i))
 	}
 }
 
