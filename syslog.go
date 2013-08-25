@@ -206,14 +206,14 @@ func NewSyslog(conn net.Conn, appender Appender, facility Priority, level Priori
 	return syslog, nil
 }
 
-// not threadsafe
+// not threadsafe. the caller must be theradsafe
 type messageQueue struct {
 	length     int
 	head, tail *message
 }
 
 var errEmpty = fmt.Errorf("empty")
-var errHighwater = fmt.Errorf("highwater threshold reached")
+var errHighwater = fmt.Errorf("highwater")
 
 func (q *messageQueue) Dequeue() (*message, error) {
 	if q.length == 0 {
