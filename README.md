@@ -1,8 +1,9 @@
 go-syslog
 =========
 
-a drop in replacement for log/syslog, go-syslog aims to be more flexible
-about output format to get along better with rsyslogd (and others?).
+a fork of the standard library's log/syslog package. meant as a drop-in
+replacement. go-syslog aims to be more flexible about output format to
+get along better with rsyslogd (and others?).
 
 Install
 =======
