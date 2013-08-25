@@ -254,7 +254,8 @@ func (syslog *Syslog) start() error {
 		return fmt.Errorf("already started")
 	}
 
-	connDone := make(chan error, 1)
+	_connDone := make(chan error, 1)
+	connDone := _connDone
 
 	term = make(chan chan error, 1)
 	syslog.termlock <- term
@@ -276,7 +277,7 @@ func (syslog *Syslog) start() error {
 					msg, err := q.Dequeue()
 					switch err {
 					case errEmpty:
-						break
+						connDone = nil
 					case nil:
 						go func() { connDone <- syslog.writeString(msg.pri, msg.tag, msg.content) }()
 					default:
@@ -290,7 +291,11 @@ func (syslog *Syslog) start() error {
 					syslog.drop(&msg, err)
 				}
 			case errch := <-term:
-				closed = true
+				if connDone == nil {
+					cont = false
+				} else {
+					closed = true
+				}
 				errch <- nil
 			}
 		}
