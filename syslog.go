@@ -85,7 +85,7 @@ var (
 	AppendBare Appender = AppenderFunc(
 		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
 			return fmt.Fprintf(w, "<%d>%s[%d]: %s%s",
-				p, host, tag, os.Getpid(), msg, termCap(msg))
+				p, tag, os.Getpid(), msg, termCap(msg))
 		},
 	)
 	AppendStd Appender = AppenderFunc(
