@@ -20,6 +20,42 @@ import (
 	"time"
 )
 
+// not a particularly fair benchmark. everything gets queued up.
+// but seriously synchronous logging w/o batching is not very good.
+func BenchmarkSyslogType(b *testing.B) {
+	conn, err := UnixConn()
+	if err != nil {
+		b.Fatal(err)
+	}
+	slog, err := NewSyslog(conn,
+		AppendStd,
+		LOG_LOCAL0,
+		LOG_NOTICE,
+		"go-syslog")
+	if err != nil {
+		b.Fatal(err)
+	}
+	logger := slog.Logger("Syslog")
+
+	for i := 0; i < b.N; i++ {
+		logger.Critf("Syslog %d", i)
+	}
+}
+
+func BenchmarkWriter(b *testing.B) {
+	w, err := DialAppended("", "",
+		LOG_LOCAL0|LOG_NOTICE,
+		"go-syslog.Writer",
+		AppendStd)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for i := 0; i < b.N; i++ {
+		w.Crit(fmt.Sprintf("Writer %d", i))
+	}
+}
+
 // a mock net.Conn implementation
 type ConnRecorder struct {
 	writes  [][]byte
