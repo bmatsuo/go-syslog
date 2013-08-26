@@ -26,6 +26,8 @@ import (
 	"time"
 )
 
+var DefaultHighwater = 4096
+
 // The Priority is a combination of the syslog facility and
 // severity. For example, LOG_ALERT | LOG_FTP sends an alert severity
 // message from the FTP facility. The default severity is LOG_EMERG;
@@ -83,35 +85,38 @@ const (
 
 var (
 	AppendBare Appender = AppenderFunc(
-		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
+		func(w io.Writer, msg Message) (int, error) {
+			content := msg.Content()
 			return fmt.Fprintf(w, "<%d>%s[%d]: %s%s",
-				p, tag, os.Getpid(), msg, termCap(msg))
+				msg.Priority(), msg.Tag(), msg.Pid(), content, termCap(content))
 		},
 	)
 	AppendStd Appender = AppenderFunc(
-		func(w io.Writer, pri Priority, host, tag, msg string) (int, error) {
-			timestamp := time.Now().Format(time.Stamp)
+		func(w io.Writer, msg Message) (int, error) {
+			content := msg.Content()
+			timestamp := msg.Time().Format(time.Stamp)
 			return fmt.Fprintf(w, "<%d>%s %s[%d]: %s%s",
-				pri, timestamp, tag, os.Getpid(), msg, termCap(msg))
+				msg.Priority(), timestamp, msg.Tag(), msg.Pid(), content, termCap(content))
 		},
 	)
 	AppendRFC3339 Appender = AppenderFunc(
-		func(w io.Writer, p Priority, host, tag, msg string) (int, error) {
+		func(w io.Writer, msg Message) (int, error) {
+			content := msg.Content()
 			timestamp := time.Now().Format(time.RFC3339)
 			return fmt.Fprintf(w, "<%d>%s %s %s[%d]: %s%s",
-				p, timestamp, host, tag, os.Getpid(), msg, termCap(msg))
+				msg.Priority(), timestamp, msg.Host(), msg.Tag(), msg.Pid(), content, termCap(content))
 		},
 	)
 )
 
 type Appender interface {
-	Append(w io.Writer, p Priority, host, tag, msg string) (int, error)
+	Append(w io.Writer, msg Message) (int, error)
 }
 
-type AppenderFunc func(io.Writer, Priority, string, string, string) (int, error)
+type AppenderFunc func(io.Writer, Message) (int, error)
 
-func (fn AppenderFunc) Append(w io.Writer, p Priority, host, tag, msg string) (int, error) {
-	return fn(w, p, host, tag, msg)
+func (fn AppenderFunc) Append(w io.Writer, msg Message) (int, error) {
+	return fn(w, msg)
 }
 
 func termCap(msg string) string {
@@ -146,11 +151,56 @@ func NewAppended(pri Priority, tag string, a Appender) (w *Writer, err error) {
 	return DialAppended("", "", pri, tag, a)
 }
 
+type Message interface {
+	Time() time.Time
+	Priority() Priority
+	Host() string
+	Tag() string
+	Pid() int
+	Content() string
+}
+
 type message struct {
+	time    time.Time
 	pri     Priority
 	tag     string
 	content string
+	pid     int
+	host    string
 	next    *message
+}
+
+func (msg *message) Time() time.Time {
+	return msg.time
+}
+
+func (msg *message) Priority() Priority {
+	return msg.pri
+}
+
+func (msg *message) Tag() string {
+	return msg.tag
+}
+
+func (msg *message) Content() string {
+	return msg.content
+}
+
+func (msg *message) Pid() int {
+	if msg.pid == 0 {
+		return os.Getpid()
+	}
+	return msg.pid
+}
+
+func (msg *message) Host() string {
+	if msg.host == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			return host
+		}
+	}
+	return msg.host
 }
 
 type Syslog struct {
@@ -198,6 +248,11 @@ func NewSyslog(conn net.Conn, appender Appender, facility Priority, level Priori
 	syslog.termlock = make(chan chan chan error, 1)
 	syslog.termlock <- nil
 
+	syslog.highwater = int64(DefaultHighwater)
+	if syslog.highwater <= 0 {
+		syslog.highwater = 4096
+	}
+
 	err := syslog.start()
 	if err != nil {
 		return nil, err
@@ -208,8 +263,9 @@ func NewSyslog(conn net.Conn, appender Appender, facility Priority, level Priori
 
 // not threadsafe. the caller must be theradsafe
 type messageQueue struct {
-	length     int
-	head, tail *message
+	length int
+	head   *message
+	tail   *message
 }
 
 var errEmpty = fmt.Errorf("empty")
@@ -221,6 +277,10 @@ func (q *messageQueue) Dequeue() (*message, error) {
 	}
 	msg := q.head
 	q.head = q.head.next
+	q.length--
+	if q.head == nil {
+		q.tail = nil
+	}
 	return msg, nil
 }
 
@@ -244,6 +304,7 @@ func (q *messageQueue) Enqueue(highwater int, msg *message) error {
 		q.tail.next = msg
 	}
 	q.tail = msg
+	q.length++
 
 	return nil
 }
@@ -255,7 +316,7 @@ func (syslog *Syslog) start() error {
 	}
 
 	_connDone := make(chan error, 1)
-	connDone := _connDone
+	var connDone chan error
 
 	term = make(chan chan error, 1)
 	syslog.termlock <- term
@@ -279,8 +340,9 @@ func (syslog *Syslog) start() error {
 					case errEmpty:
 						connDone = nil
 					case nil:
-						go func() { connDone <- syslog.writeString(msg.pri, msg.tag, msg.content) }()
+						go func() { _connDone <- syslog.writeMessage(msg) }()
 					default:
+						// things are going to break here with connDone = nil logic
 						go syslog.failure(err)
 					}
 				}
@@ -289,6 +351,9 @@ func (syslog *Syslog) start() error {
 				err := q.Enqueue(int(highwater), &msg)
 				if err != nil {
 					syslog.drop(&msg, err)
+				} else if connDone == nil {
+					connDone = _connDone
+					go func() { _connDone <- nil }() // prime; this is a little shitty
 				}
 			case errch := <-term:
 				if connDone == nil {
@@ -320,12 +385,20 @@ func (syslog *Syslog) Highwater(n int) {
 	atomic.StoreInt64(&syslog.highwater, int64(n))
 }
 
-func (syslog *Syslog) writeString(level Priority, tag string, msg string) error {
-	pri := syslog.facility
-	pri = pri | (level & severityMask)
+func (syslog *Syslog) log(level Priority, tag string, content string) {
+	var msg message
+	msg.time = time.Now()
+	msg.pri = syslog.facility
+	msg.pri = msg.pri | (level & severityMask)
+	msg.tag = tag
+	msg.content = content
+	syslog.in <- msg
+}
+
+func (syslog *Syslog) writeMessage(msg *message) error {
 	return syslog.doConn(func(conn net.Conn) error {
 		if conn != nil {
-			_, err := syslog.appender.Append(conn, pri, syslog.hostname, tag, msg)
+			_, err := syslog.appender.Append(conn, msg)
 			if err != nil {
 				return err
 			}
@@ -362,75 +435,72 @@ func (syslog *Syslog) Logger(tag string) *Logger {
 	}
 }
 
-func (logger *Logger) Emergf(format string, v ...interface{}) error {
-	return logger.Emerg(fmt.Sprintf(format, v...))
+func (logger *Logger) Emergf(format string, v ...interface{}) {
+	logger.Emerg(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Alertf(format string, v ...interface{}) error {
-	return logger.Alert(fmt.Sprintf(format, v...))
+func (logger *Logger) Alertf(format string, v ...interface{}) {
+	logger.Alert(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Critf(format string, v ...interface{}) error {
-	return logger.Crit(fmt.Sprintf(format, v...))
+func (logger *Logger) Critf(format string, v ...interface{}) {
+	logger.Crit(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Errf(format string, v ...interface{}) error {
-	return logger.Err(fmt.Sprintf(format, v...))
+func (logger *Logger) Errf(format string, v ...interface{}) {
+	logger.Err(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Warningf(format string, v ...interface{}) error {
-	return logger.Warning(fmt.Sprintf(format, v...))
+func (logger *Logger) Warningf(format string, v ...interface{}) {
+	logger.Warning(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Noticef(format string, v ...interface{}) error {
-	return logger.Notice(fmt.Sprintf(format, v...))
+func (logger *Logger) Noticef(format string, v ...interface{}) {
+	logger.Notice(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Infof(format string, v ...interface{}) error {
-	return logger.Info(fmt.Sprintf(format, v...))
+func (logger *Logger) Infof(format string, v ...interface{}) {
+	logger.Info(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Debugf(format string, v ...interface{}) error {
-	return logger.Debug(fmt.Sprintf(format, v...))
+func (logger *Logger) Debugf(format string, v ...interface{}) {
+	logger.Debug(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) Printf(format string, v ...interface{}) error {
-	return logger.Print(fmt.Sprintf(format, v...))
+func (logger *Logger) Printf(format string, v ...interface{}) {
+	logger.Print(fmt.Sprintf(format, v...))
 }
-func (logger *Logger) PrintLevelf(level Priority, format string, v ...interface{}) error {
-	return logger.PrintLevel(level, fmt.Sprintf(format, v...))
-}
-
-func (logger *Logger) Emerg(v ...interface{}) error {
-	return logger.PrintLevel(LOG_EMERG, v...)
-}
-func (logger *Logger) Alert(v ...interface{}) error {
-	return logger.PrintLevel(LOG_ALERT, v...)
-}
-func (logger *Logger) Crit(v ...interface{}) error {
-	return logger.PrintLevel(LOG_CRIT, v...)
-}
-func (logger *Logger) Err(v ...interface{}) error {
-	return logger.PrintLevel(LOG_ERR, v...)
-}
-func (logger *Logger) Warning(v ...interface{}) error {
-	return logger.PrintLevel(LOG_WARNING, v...)
-}
-func (logger *Logger) Notice(v ...interface{}) error {
-	return logger.PrintLevel(LOG_NOTICE, v...)
-}
-func (logger *Logger) Info(v ...interface{}) error {
-	return logger.PrintLevel(LOG_INFO, v...)
-}
-func (logger *Logger) Debug(v ...interface{}) error {
-	return logger.PrintLevel(LOG_DEBUG, v...)
-}
-func (logger *Logger) Print(v ...interface{}) error {
-	return logger.PrintLevel(logger.pri, v...)
+func (logger *Logger) PrintLevelf(level Priority, format string, v ...interface{}) {
+	logger.PrintLevel(level, fmt.Sprintf(format, v...))
 }
 
-func (logger *Logger) PrintLevel(level Priority, v ...interface{}) error {
-	return logger.syslog.writeString(level, logger.tag, fmt.Sprint(v...))
+func (logger *Logger) Emerg(v ...interface{}) {
+	logger.PrintLevel(LOG_EMERG, v...)
+}
+func (logger *Logger) Alert(v ...interface{}) {
+	logger.PrintLevel(LOG_ALERT, v...)
+}
+func (logger *Logger) Crit(v ...interface{}) {
+	logger.PrintLevel(LOG_CRIT, v...)
+}
+func (logger *Logger) Err(v ...interface{}) {
+	logger.PrintLevel(LOG_ERR, v...)
+}
+func (logger *Logger) Warning(v ...interface{}) {
+	logger.PrintLevel(LOG_WARNING, v...)
+}
+func (logger *Logger) Notice(v ...interface{}) {
+	logger.PrintLevel(LOG_NOTICE, v...)
+}
+func (logger *Logger) Info(v ...interface{}) {
+	logger.PrintLevel(LOG_INFO, v...)
+}
+func (logger *Logger) Debug(v ...interface{}) {
+	logger.PrintLevel(LOG_DEBUG, v...)
+}
+func (logger *Logger) Print(v ...interface{}) {
+	logger.PrintLevel(logger.pri, v...)
+}
+
+func (logger *Logger) PrintLevel(level Priority, v ...interface{}) {
+	logger.syslog.log(level, logger.tag, fmt.Sprint(v...))
 }
 
 func (logger *Logger) Write(p []byte) (int, error) {
-	err := logger.syslog.writeString(logger.pri, logger.tag, string(p))
-	if err != nil {
-		return 0, err
-	}
-	return len(p), err
+	logger.syslog.log(logger.pri, logger.tag, string(p))
+	return len(p), nil
 }
 
 // Dial establishes a connection to a log daemon by connecting to
@@ -599,7 +669,13 @@ func (w *Writer) writeAndRetry(p Priority, s string) (int, error) {
 // write generates and writes a syslog formatted string. The
 // format is as follows: <PRI>TIMESTAMP HOSTNAME TAG[PID]: MSG
 func (w *Writer) write(p Priority, msg string) (int, error) {
-	return w.appender.Append(w.conn, p, w.hostname, w.tag, msg)
+	m := new(message)
+	m.time = time.Now()
+	m.pri = p
+	m.host = w.hostname
+	m.tag = w.tag
+	m.content = msg
+	return w.appender.Append(w.conn, m)
 }
 
 // NewLogger creates a log.Logger whose output is written to

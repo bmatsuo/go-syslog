@@ -154,10 +154,7 @@ func TestSyslog(t *testing.T) {
 	logger := slog.Logger("test")
 	for i := 0; i < 10; i++ {
 		msg := fmt.Sprintf("loop iteration: ", i)
-		err := logger.Notice(msg)
-		if err != nil {
-			t.Fatal(err)
-		}
+		logger.Notice(msg)
 
 		p := <-writech
 		if bytes.Index(p, []byte(msg)) < 0 {
