@@ -87,24 +87,43 @@ var (
 	AppendBare Appender = AppenderFunc(
 		func(w io.Writer, msg Message) (int, error) {
 			content := msg.Content()
-			return fmt.Fprintf(w, "<%d>%s[%d]: %s%s",
-				msg.Priority(), msg.Tag(), msg.Pid(), content, termCap(content))
+			return fmt.Fprintf(w,
+				"<%d>%s[%d]: %s%s",
+				msg.Priority(), msg.Tag(), msg.Pid(),
+				content, termCap(content))
 		},
 	)
 	AppendStd Appender = AppenderFunc(
 		func(w io.Writer, msg Message) (int, error) {
 			content := msg.Content()
 			timestamp := msg.Time().Format(time.Stamp)
-			return fmt.Fprintf(w, "<%d>%s %s[%d]: %s%s",
-				msg.Priority(), timestamp, msg.Tag(), msg.Pid(), content, termCap(content))
+			return fmt.Fprintf(w,
+				"<%d>%s %s[%d]: %s%s",
+				msg.Priority(), timestamp,
+				msg.Tag(), msg.Pid(),
+				content, termCap(content))
 		},
 	)
 	AppendRFC3339 Appender = AppenderFunc(
 		func(w io.Writer, msg Message) (int, error) {
 			content := msg.Content()
 			timestamp := time.Now().Format(time.RFC3339)
-			return fmt.Fprintf(w, "<%d>%s %s %s[%d]: %s%s",
-				msg.Priority(), timestamp, msg.Host(), msg.Tag(), msg.Pid(), content, termCap(content))
+			return fmt.Fprintf(w,
+				"<%d>%s %s %s[%d]: %s%s",
+				msg.Priority(), timestamp,
+				msg.Host(), msg.Tag(), msg.Pid(),
+				content, termCap(content))
+		},
+	)
+	AppendRFC5424v1 Appender = AppenderFunc(
+		func(w io.Writer, msg Message) (int, error) {
+			content := msg.Content()
+			timestamp := time.Now().Format(time.RFC3339)
+			return fmt.Fprintf(w,
+				"<%d>%d %s %s %s %d %s%s",
+				msg.Priority(), 1, timestamp,
+				msg.Host(), msg.Tag(), msg.Pid(),
+				content, termCap(content))
 		},
 	)
 )
